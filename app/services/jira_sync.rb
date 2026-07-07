@@ -1,5 +1,5 @@
 class JiraSync
-  EPIC_FIELDS  = %w[summary status priority assignee].freeze
+  EPIC_FIELDS  = %w[summary status priority assignee created].freeze
   ISSUE_FIELDS = %w[summary status issuetype assignee priority created parent labels components description].freeze
 
   def initialize(epic_query: LASER_FOCUS_CONFIG.board.epic_query,
@@ -23,7 +23,7 @@ class JiraSync
     fetched = 0
     now = Time.current
 
-    epics_jira = @client.search_all(@epic_query, fields: EPIC_FIELDS)
+    epics_jira = @client.search_all(@epic_query, fields: EPIC_FIELDS, expand: "changelog")
     epics_by_key = {}
     epics_jira.each do |je|
       epic = upsert_epic(je, now)
@@ -70,7 +70,10 @@ class JiraSync
       fetched += children.size + subtasks.size
     end
 
+    dropped_epics = Epic.active.where.not(jira_key: epics_by_key.keys).pluck(:id, :jira_key, :name)
     Epic.active.where.not(jira_key: epics_by_key.keys).update_all(removed_at: now)
+    dropped_times = epic_removal_times(dropped_epics.map { |(_, jira_key, _)| jira_key }, now)
+    record_epic_events(dropped_epics, "removed", now, times_by_key: dropped_times)
 
     seen_orphan_keys = []
     if @unplanned_query.present?
@@ -79,6 +82,9 @@ class JiraSync
       orphans.each do |ji|
         if (clashing_epic = epics_by_key.delete(ji.key))
           clashing_epic.update!(removed_at: now)
+          occurred_at = last_field_change_at(ji, %w[status labels]) || now
+          record_epic_events([ [ clashing_epic.id, clashing_epic.jira_key, clashing_epic.name ] ], "removed", now,
+                              times_by_key: { clashing_epic.jira_key => occurred_at })
         end
         upsert_issue(ji, nil, now)
         seen_orphan_keys << ji.key
@@ -130,10 +136,79 @@ class JiraSync
     run
   end
 
+  # One-time (re-runnable) backfill for EpicEvent rows created before we
+  # started deriving occurred_at from Jira's changelog — they were stamped
+  # with the sync time they happened to be discovered at instead of the real
+  # label/status change time. Safe to run repeatedly; only touches rows whose
+  # timestamp actually changes, and skips any jira_key with more than one
+  # event since we can't tell which one a single changelog lookup applies to.
+  def backfill_event_times!
+    jira_keys = EpicEvent.distinct.pluck(:jira_key)
+    return 0 if jira_keys.empty?
+
+    updated = 0
+    results = @client.search_all("key in (#{jira_key_list(jira_keys)})", fields: EPIC_FIELDS, expand: "changelog")
+    results.each do |ji|
+      changed_at = last_field_change_at(ji, %w[status labels])
+      next unless changed_at
+
+      events = EpicEvent.where(jira_key: ji.key).to_a
+      if events.size > 1
+        Rails.logger.warn("[JiraSync] backfill skipped #{ji.key}: #{events.size} events, ambiguous which to update")
+        next
+      end
+
+      event = events.first
+      next if event.nil? || event.occurred_at == changed_at
+
+      event.update!(occurred_at: changed_at)
+      updated += 1
+    end
+    updated
+  end
+
+  # One-time discovery for epics that hit a terminal status (SUCCESS, FAILURE,
+  # REJECTED, "GONE BAD", ...) *before* this app ever synced them — they never
+  # matched epic_query, so the normal add/remove diffing in `run!` never saw
+  # them and has no baseline to log a removal against. `jql` should select
+  # exactly those already-closed epics (mirror epic_query but flip the status
+  # filter, e.g. `status IN (SUCCESS, FAILURE, REJECTED, "GONE BAD")`).
+  # Backfills both the "added" and "removed" EpicEvent for each one found,
+  # skipping any jira_key we already have a row for.
+  def discover_closed_epics!(jql)
+    created = 0
+    results = @client.search_all(jql, fields: EPIC_FIELDS, expand: "changelog")
+    results.each do |je|
+      next if Epic.exists?(jira_key: je.key)
+
+      added_at = last_field_change_at(je, %w[labels]) || parse_time(je.fields["created"]) || Time.current
+      removed_at = last_field_change_at(je, %w[status]) || Time.current
+
+      epic = Epic.create!(
+        jira_key: je.key,
+        name: je.fields["summary"],
+        jira_status: je.fields.dig("status", "name"),
+        priority: priority_int(je.fields["priority"]),
+        raw_fields: je.fields,
+        last_seen_in_query_at: Time.current,
+        removed_at: removed_at
+      )
+      EpicEvent.create!(epic: epic, jira_key: epic.jira_key, name: epic.name,
+                         event_type: "added", occurred_at: added_at)
+      EpicEvent.create!(epic: epic, jira_key: epic.jira_key, name: epic.name,
+                         event_type: "removed", occurred_at: removed_at)
+      created += 1
+    end
+    created
+  end
+
   private
 
   def upsert_epic(je, now)
     epic = Epic.find_or_initialize_by(jira_key: je.key)
+    was_new = epic.new_record?
+    was_removed = epic.removed_at.present?
+
     epic.assign_attributes(
       name: je.fields["summary"],
       jira_status: je.fields.dig("status", "name"),
@@ -143,7 +218,45 @@ class JiraSync
       removed_at: nil
     )
     epic.save!
+
+    if was_new || was_removed
+      EpicEvent.create!(
+        epic: epic,
+        jira_key: epic.jira_key,
+        name: epic.name,
+        event_type: "added",
+        occurred_at: last_field_change_at(je, %w[status labels]) || now
+      )
+    end
+
     epic
+  end
+
+  def record_epic_events(epics, event_type, now, times_by_key: {})
+    return if epics.empty?
+
+    EpicEvent.insert_all(
+      epics.map do |id, jira_key, name|
+        { epic_id: id, jira_key: jira_key, name: name, event_type: event_type,
+          occurred_at: times_by_key.fetch(jira_key, now), created_at: now, updated_at: now }
+      end
+    )
+  end
+
+  # Looks up the current changelog for epics that just dropped out of the
+  # epic_query result set (e.g. lost the Priority label, or hit a terminal
+  # status) so the "removed" event can be timestamped at the real Jira field
+  # change instead of "whenever this sync happened to run".
+  def epic_removal_times(jira_keys, now)
+    return {} if jira_keys.empty?
+
+    results = @client.search_all("key in (#{jira_key_list(jira_keys)})", fields: EPIC_FIELDS, expand: "changelog")
+    results.each_with_object({}) do |ji, times|
+      times[ji.key] = last_field_change_at(ji, %w[status labels]) || now
+    end
+  rescue => e
+    Rails.logger.warn("[JiraSync] epic removal time lookup failed: #{e.message}")
+    {}
   end
 
   def upsert_issue(ji, epic, now, provisional: false)
@@ -174,9 +287,21 @@ class JiraSync
   end
 
   def last_status_change_at(ji)
+    last_field_change_at(ji, %w[status])
+  end
+
+  # Most recent changelog entry touching any of `fields`. For "labels" we only
+  # count entries that actually mention the "Priority" label, so an unrelated
+  # label edit on the same epic doesn't get credited as an add/remove trigger.
+  def last_field_change_at(ji, fields)
     histories = ji.attrs.dig("changelog", "histories") || []
     times = histories.flat_map do |h|
-      next [] unless h["items"]&.any? { |it| it["field"] == "status" }
+      relevant = (h["items"] || []).any? do |it|
+        next false unless fields.include?(it["field"])
+        next true unless it["field"] == "labels"
+        [ it["toString"], it["fromString"] ].compact.any? { |s| s.include?("Priority") }
+      end
+      next [] unless relevant
       t = parse_time(h["created"])
       t ? [ t ] : []
     end

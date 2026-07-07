@@ -281,6 +281,243 @@ class JiraSyncTest < ActiveSupport::TestCase
     assert_not SyncRun.most_recent.first.ok
   end
 
+  test "records an EpicEvent when a new epic first appears" do
+    stub_request(:get, %r{/search}).to_return do |req|
+      decoded = CGI.unescape(req.uri.to_s)
+      body = case decoded
+      when /labels.*Priority/i
+               { "issues" => [
+                   { "key" => "PG-1", "fields" => { "summary" => "Epic A",
+                                                    "status" => { "name" => "In Progress" },
+                                                    "priority" => { "id" => "1" } } }
+                 ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
+      else
+               { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
+      end
+      { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
+    end
+
+    assert_difference -> { EpicEvent.count }, 1 do
+      JiraSync.new(epic_query: 'project = PG AND labels = "Priority"', unplanned_query: nil).run!
+    end
+
+    event = EpicEvent.last
+    assert_equal "added", event.event_type
+    assert_equal "PG-1", event.jira_key
+    assert_equal "Epic A", event.name
+
+    # A second sync with the epic still present must not record another event.
+    assert_no_difference -> { EpicEvent.count } do
+      JiraSync.new(epic_query: 'project = PG AND labels = "Priority"', unplanned_query: nil).run!
+    end
+  end
+
+  test "records an EpicEvent when an epic drops out of the query" do
+    epic = Epic.create!(jira_key: "PG-9", name: "Gone soon", priority: 1, jira_status: "In Progress")
+
+    stub_request(:get, %r{/search}).to_return(
+      status: 200,
+      body: { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }.to_json,
+      headers: { "Content-Type" => "application/json" }
+    )
+
+    assert_difference -> { EpicEvent.count }, 1 do
+      JiraSync.new(epic_query: 'project = PG AND labels = "Priority"').run!
+    end
+
+    event = EpicEvent.last
+    assert_equal "removed", event.event_type
+    assert_equal epic.jira_key, event.jira_key
+    assert_not_nil epic.reload.removed_at
+  end
+
+  test "backdates the added event to when the Priority label actually landed" do
+    labeled_at = "2026-06-01T08:00:00.000+0000"
+
+    stub_request(:get, %r{/search}).to_return do |req|
+      decoded = CGI.unescape(req.uri.to_s)
+      body = case decoded
+      when /labels.*Priority/i
+               { "issues" => [
+                   { "key" => "PG-1", "fields" => { "summary" => "Epic A",
+                                                    "status" => { "name" => "In Progress" },
+                                                    "priority" => { "id" => "1" } },
+                     "changelog" => { "histories" => [
+                       { "created" => "2026-05-20T09:00:00.000+0000",
+                         "items" => [ { "field" => "labels", "toString" => "backend",
+                                       "fromString" => "" } ] },
+                       { "created" => labeled_at,
+                         "items" => [ { "field" => "labels", "toString" => "backend Priority",
+                                       "fromString" => "backend" } ] }
+                     ] } }
+                 ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
+      else
+               { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
+      end
+      { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
+    end
+
+    JiraSync.new(epic_query: 'project = PG AND labels = "Priority"', unplanned_query: nil).run!
+
+    event = EpicEvent.last
+    assert_equal "added", event.event_type
+    assert_equal Time.parse(labeled_at), event.occurred_at
+  end
+
+  test "backdates the removed event to when the epic dropped out via a follow-up changelog lookup" do
+    epic = Epic.create!(jira_key: "PG-9", name: "Gone soon", priority: 1, jira_status: "In Progress")
+    dropped_at = "2026-06-15T14:30:00.000+0000"
+
+    stub_request(:get, %r{/search}).to_return do |req|
+      decoded = CGI.unescape(req.uri.to_s)
+      body = if decoded =~ /key\s+in\s*\(.*PG-9.*\)/i
+               { "issues" => [
+                   { "key" => "PG-9", "fields" => { "summary" => "Gone soon" },
+                     "changelog" => { "histories" => [
+                       { "created" => dropped_at,
+                         "items" => [ { "field" => "status", "fromString" => "In Progress",
+                                       "toString" => "SUCCESS" } ] }
+                     ] } }
+                 ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
+             else
+               { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
+             end
+      { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
+    end
+
+    JiraSync.new(epic_query: 'project = PG AND labels = "Priority"').run!
+
+    event = EpicEvent.last
+    assert_equal "removed", event.event_type
+    assert_equal epic.jira_key, event.jira_key
+    assert_equal Time.parse(dropped_at), event.occurred_at
+  end
+
+  test "backfill_event_times! corrects a stale bootstrap timestamp from the changelog" do
+    real_time = "2026-05-10T11:00:00.000+0000"
+    event = EpicEvent.create!(jira_key: "PG-20", name: "Backfill me", event_type: "added",
+                              occurred_at: Time.current)
+
+    stub_request(:get, %r{/search}).to_return do |req|
+      decoded = CGI.unescape(req.uri.to_s)
+      body = if decoded =~ /key\s+in\s*\(.*PG-20.*\)/i
+               { "issues" => [
+                   { "key" => "PG-20", "fields" => { "summary" => "Backfill me" },
+                     "changelog" => { "histories" => [
+                       { "created" => real_time,
+                         "items" => [ { "field" => "labels", "toString" => "Priority",
+                                       "fromString" => "" } ] }
+                     ] } }
+                 ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
+             else
+               { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
+             end
+      { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
+    end
+
+    updated = JiraSync.new.backfill_event_times!
+
+    assert_equal 1, updated
+    assert_equal Time.parse(real_time), event.reload.occurred_at
+  end
+
+  test "backfill_event_times! skips a jira_key with more than one event" do
+    EpicEvent.create!(jira_key: "PG-21", name: "Ambiguous", event_type: "added", occurred_at: 2.days.ago)
+    EpicEvent.create!(jira_key: "PG-21", name: "Ambiguous", event_type: "removed", occurred_at: 1.day.ago)
+
+    stub_request(:get, %r{/search}).to_return(
+      status: 200,
+      body: { "issues" => [
+          { "key" => "PG-21", "fields" => { "summary" => "Ambiguous" },
+            "changelog" => { "histories" => [
+              { "created" => "2026-05-10T11:00:00.000+0000",
+                "items" => [ { "field" => "status", "fromString" => "In Progress", "toString" => "SUCCESS" } ] }
+            ] } }
+        ], "total" => 1, "startAt" => 0, "maxResults" => 50 }.to_json,
+      headers: { "Content-Type" => "application/json" }
+    )
+
+    assert_equal 0, JiraSync.new.backfill_event_times!
+  end
+
+  test "backfill_event_times! makes no request when there are no events" do
+    assert_equal 0, JiraSync.new.backfill_event_times!
+    assert_not_requested(:get, %r{/search})
+  end
+
+  test "discover_closed_epics! backfills add+remove history for an epic closed before tracking began" do
+    labeled_at = "2026-04-01T09:00:00.000+0000"
+    closed_at = "2026-04-20T16:00:00.000+0000"
+
+    stub_request(:get, %r{/search}).to_return(
+      status: 200,
+      body: { "issues" => [
+          { "key" => "PG-2502", "fields" => { "summary" => "Old finished epic",
+                                              "status" => { "name" => "SUCCESS" },
+                                              "created" => "2026-03-01T09:00:00.000+0000" },
+            "changelog" => { "histories" => [
+              { "created" => labeled_at,
+                "items" => [ { "field" => "labels", "toString" => "Priority", "fromString" => "" } ] },
+              { "created" => closed_at,
+                "items" => [ { "field" => "status", "fromString" => "In Progress", "toString" => "SUCCESS" } ] }
+            ] } }
+        ], "total" => 1, "startAt" => 0, "maxResults" => 50 }.to_json,
+      headers: { "Content-Type" => "application/json" }
+    )
+
+    created = JiraSync.new.discover_closed_epics!('status IN (SUCCESS, FAILURE, REJECTED, "GONE BAD")')
+
+    assert_equal 1, created
+    epic = Epic.find_by!(jira_key: "PG-2502")
+    assert_not_nil epic.removed_at
+
+    added = EpicEvent.find_by!(jira_key: "PG-2502", event_type: "added")
+    removed = EpicEvent.find_by!(jira_key: "PG-2502", event_type: "removed")
+    assert_equal Time.parse(labeled_at), added.occurred_at
+    assert_equal Time.parse(closed_at), removed.occurred_at
+  end
+
+  test "discover_closed_epics! falls back to the epic's own created date when labels history is missing" do
+    created_at = "2026-03-01T09:00:00.000+0000"
+    closed_at = "2026-04-20T16:00:00.000+0000"
+
+    stub_request(:get, %r{/search}).to_return(
+      status: 200,
+      body: { "issues" => [
+          { "key" => "PG-2503", "fields" => { "summary" => "Created already labeled",
+                                              "status" => { "name" => "FAILURE" },
+                                              "created" => created_at },
+            "changelog" => { "histories" => [
+              { "created" => closed_at,
+                "items" => [ { "field" => "status", "fromString" => "In Progress", "toString" => "FAILURE" } ] }
+            ] } }
+        ], "total" => 1, "startAt" => 0, "maxResults" => 50 }.to_json,
+      headers: { "Content-Type" => "application/json" }
+    )
+
+    JiraSync.new.discover_closed_epics!('status IN (SUCCESS, FAILURE, REJECTED, "GONE BAD")')
+
+    added = EpicEvent.find_by!(jira_key: "PG-2503", event_type: "added")
+    assert_equal Time.parse(created_at), added.occurred_at
+  end
+
+  test "discover_closed_epics! skips a key that's already tracked" do
+    Epic.create!(jira_key: "PG-2504", name: "Already known", priority: 1, jira_status: "SUCCESS",
+                removed_at: Time.current)
+
+    stub_request(:get, %r{/search}).to_return(
+      status: 200,
+      body: { "issues" => [
+          { "key" => "PG-2504", "fields" => { "summary" => "Already known", "status" => { "name" => "SUCCESS" } } }
+        ], "total" => 1, "startAt" => 0, "maxResults" => 50 }.to_json,
+      headers: { "Content-Type" => "application/json" }
+    )
+
+    assert_no_difference -> { EpicEvent.count } do
+      assert_equal 0, JiraSync.new.discover_closed_epics!('status IN (SUCCESS, FAILURE, REJECTED, "GONE BAD")')
+    end
+  end
+
   def jira_time(t) = t.strftime("%Y-%m-%dT%H:%M:%S.000%z")
 
   test "upserts a fresh new-status candidate as provisional orphan" do

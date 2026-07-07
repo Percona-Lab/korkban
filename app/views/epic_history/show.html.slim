@@ -1,0 +1,126 @@
+- content_for :title, "Goal History – LaserFocus"
+
+.kb-history
+  header.kb-history-header
+    h1 Goal history
+    a.kb-history-back href="/" ← Back to board
+
+  - if @events_by_day.empty?
+    p.kb-history-empty No goals have been added or removed since tracking started.
+  - else
+    - @events_by_day.each do |day, events|
+      section.kb-history-day
+        h2.kb-history-date= day.strftime("%A, %B %-d, %Y")
+        ul.kb-history-list
+          - events.each do |event|
+            - row_classes = [ "kb-history-row", event.event_type == "added" ? "is-added" : "is-removed" ]
+            li class=row_classes.join(" ")
+              span.kb-history-icon= event.event_type == "added" ? "+" : "−"
+              a.kb-history-link href=jira_url(event.jira_key) target="_blank" rel="noreferrer"
+                span.kb-history-name= event.name
+                span.kb-history-key= event.jira_key
+              span.kb-history-time= event.occurred_at.strftime("%-l:%M %p")
+
+css:
+  .kb-history {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+    font-family: var(--kb-ui);
+    color: var(--kb-text);
+    background: var(--kb-bg);
+    min-height: 100vh;
+  }
+  .kb-history-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 32px;
+  }
+  .kb-history-header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0;
+  }
+  .kb-history-back {
+    color: var(--kb-text-soft);
+    text-decoration: none;
+    font-size: 13px;
+  }
+  .kb-history-back:hover {
+    color: var(--kb-text);
+  }
+  .kb-history-empty {
+    color: var(--kb-text-mute);
+    font-size: 14px;
+  }
+  .kb-history-day {
+    margin-bottom: 28px;
+  }
+  .kb-history-date {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--kb-text-mute);
+    margin: 0 0 10px;
+  }
+  .kb-history-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--kb-border);
+    border-radius: 10px;
+    background: var(--kb-surface);
+    overflow: hidden;
+  }
+  .kb-history-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    font-size: 13.5px;
+    border-bottom: 1px solid var(--kb-border);
+  }
+  .kb-history-row:last-child {
+    border-bottom: none;
+  }
+  .kb-history-icon {
+    width: 18px;
+    text-align: center;
+    font-weight: 700;
+    font-family: var(--kb-mono);
+  }
+  .is-added .kb-history-icon { color: #16a34a; }
+  .is-removed .kb-history-icon { color: #dc2626; }
+  .is-removed .kb-history-name { text-decoration: line-through; color: var(--kb-text-mute); }
+  .kb-history-link {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: inherit;
+    text-decoration: none;
+  }
+  .kb-history-link:hover .kb-history-name {
+    text-decoration: underline;
+  }
+  .kb-history-name {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .kb-history-key {
+    font-family: var(--kb-mono);
+    font-size: 12px;
+    color: var(--kb-text-mute);
+    flex-shrink: 0;
+  }
+  .kb-history-time {
+    font-size: 12px;
+    color: var(--kb-text-faint);
+    width: 72px;
+    text-align: right;
+  }

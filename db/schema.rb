@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_01_000001) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_07_000001) do
   create_table "board_orders", force: :cascade do |t|
     t.json "column_order", default: [], null: false
     t.datetime "created_at", null: false
@@ -21,6 +21,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_01_000001) do
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.integer "version", default: 0, null: false
+  end
+
+  create_table "epic_events", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.integer "epic_id"
+    t.string "event_type", null: false
+    t.string "jira_key", null: false
+    t.string "name", null: false
+    t.datetime "occurred_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["jira_key"], name: "index_epic_events_on_jira_key"
+    t.index ["occurred_at"], name: "index_epic_events_on_occurred_at"
   end
 
   create_table "epics", force: :cascade do |t|
