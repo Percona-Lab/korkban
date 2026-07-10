@@ -11,5 +11,6 @@ class CreateEpicEvents < ActiveRecord::Migration[8.1]
     end
     add_index :epic_events, :occurred_at
     add_index :epic_events, :jira_key
+    add_index :epic_events, :epic_id
   end
 end

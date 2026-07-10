@@ -31,6 +31,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_07_000001) do
     t.string "name", null: false
     t.datetime "occurred_at", null: false
     t.datetime "updated_at", null: false
+    t.index ["epic_id"], name: "index_epic_events_on_epic_id"
     t.index ["jira_key"], name: "index_epic_events_on_jira_key"
     t.index ["occurred_at"], name: "index_epic_events_on_occurred_at"
   end
