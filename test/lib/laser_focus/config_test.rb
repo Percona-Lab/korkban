@@ -65,6 +65,17 @@ class LaserFocusConfigTest < ActiveSupport::TestCase
       staleness: { somewhat_days: 3, really_days: 10 }
   YAML
 
+  test "reads closed_epics_query" do
+    yaml = BASE + "  closed_epics_query: \"project = PG AND status = SUCCESS\"\n"
+    cfg = LaserFocus::Config.load_from_string(yaml)
+    assert_equal "project = PG AND status = SUCCESS", cfg.board.closed_epics_query
+  end
+
+  test "closed_epics_query is optional" do
+    cfg = LaserFocus::Config.load_from_string(BASE)
+    assert_nil cfg.board.closed_epics_query
+  end
+
   test "reads new_unplanned_query" do
     yaml = BASE + "  new_unplanned_query: \"project = PG AND created >= -10d\"\n"
     cfg = LaserFocus::Config.load_from_string(yaml)

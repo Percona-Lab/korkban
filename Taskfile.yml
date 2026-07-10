@@ -21,6 +21,16 @@ tasks:
     cmds:
       - docker compose run --rm app bin/rails db:migrate
 
+  backfill-history:
+    desc: "Backfill EpicEvent timestamps from Jira's changelog (one-time fix for the initial rollout)"
+    cmds:
+      - docker compose run --rm app bin/rails epic_events:backfill
+
+  discover-closed-epics:
+    desc: "Find epics already closed (SUCCESS/FAILURE/REJECTED/etc) before this app ever tracked them, and backfill their history"
+    cmds:
+      - docker compose run --rm app bin/rails epic_events:discover_closed
+
   lint:
     desc: "Run RuboCop (matches CI lint job)"
     cmds:
