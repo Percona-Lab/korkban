@@ -111,20 +111,20 @@ class Issue < ApplicationRecord
     out = +""
     rest = text.dup
     patterns = [
-      [/\[([^\]|]*)\|([^\]|]+)\|[^\]]+\]/, :jira_smart],  # [text|url|type]
-      [/\[([^\]|]+)\|([^\]|]+)\]/,          :jira_link],   # [text|url]
-      [/\[([^\]]+)\]/,                       :jira_bare],   # [url]
-      [/\{\{([^}]+)\}\}/,                    :code],
-      [/(?<![a-zA-Z0-9])\*([^*\n]+)\*(?![a-zA-Z0-9])/, :bold],
-      [/(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])/,   :italic],
-      [/https?:\/\/[^\s<>"|]+/,              :bare_url],
+      [ /\[([^\]|]*)\|([^\]|]+)\|[^\]]+\]/, :jira_smart ],  # [text|url|type]
+      [ /\[([^\]|]+)\|([^\]|]+)\]/,          :jira_link ],   # [text|url]
+      [ /\[([^\]]+)\]/,                       :jira_bare ],   # [url]
+      [ /\{\{([^}]+)\}\}/,                    :code ],
+      [ /(?<![a-zA-Z0-9])\*([^*\n]+)\*(?![a-zA-Z0-9])/, :bold ],
+      [ /(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])/,   :italic ],
+      [ /https?:\/\/[^\s<>"|]+/,              :bare_url ]
     ]
     until rest.empty?
       earliest = nil
       patterns.each do |pat, type|
         m = rest.match(pat)
         next unless m
-        earliest = [m.begin(0), type, m] if earliest.nil? || m.begin(0) < earliest[0]
+        earliest = [ m.begin(0), type, m ] if earliest.nil? || m.begin(0) < earliest[0]
       end
       unless earliest
         out << CGI.escapeHTML(rest)

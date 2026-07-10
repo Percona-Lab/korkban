@@ -293,9 +293,9 @@ class JiraSyncTest < ActiveSupport::TestCase
                        "summary" => "Brand new", "status" => { "name" => "To Do" },
                        "issuetype" => { "name" => "Task" }, "created" => created } }
                  ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
-             else
+      else
                { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
-             end
+      end
       { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
     end
 
@@ -320,12 +320,12 @@ class JiraSyncTest < ActiveSupport::TestCase
       body = if decoded =~ /parent is EMPTY/i
                { "issues" => [ { "key" => "PG-501", "fields" => fields } ],
                  "total" => 1, "startAt" => 0, "maxResults" => 50 }
-             elsif decoded =~ /statusCategory\s*=\s*"To Do"/i
+      elsif decoded =~ /statusCategory\s*=\s*"To Do"/i
                { "issues" => [ { "key" => "PG-501", "fields" => fields } ],
                  "total" => 1, "startAt" => 0, "maxResults" => 50 }
-             else
+      else
                { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
-             end
+      end
       { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
     end
 
@@ -350,9 +350,9 @@ class JiraSyncTest < ActiveSupport::TestCase
                        "summary" => "Old", "status" => { "name" => "To Do" },
                        "issuetype" => { "name" => "Task" }, "created" => created } }
                  ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
-             else
+      else
                { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
-             end
+      end
       { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
     end
 
@@ -376,9 +376,9 @@ class JiraSyncTest < ActiveSupport::TestCase
                        "summary" => "InProg", "status" => { "name" => "In Progress" },
                        "issuetype" => { "name" => "Task" }, "created" => created } }
                  ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
-             else
+      else
                { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
-             end
+      end
       { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
     end
 
