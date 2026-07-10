@@ -88,6 +88,7 @@ module LaserFocus
     class BoardSection
       def initialize(h) = @h = h
       def epic_query  = @h["epic_query"]
+      def closed_epics_query = @h["closed_epics_query"]
       def unplanned_query = @h["unplanned_query"]
       def new_unplanned_query = @h["new_unplanned_query"]
       def new_unplanned_days  = @h.fetch("new_unplanned_days", 10)

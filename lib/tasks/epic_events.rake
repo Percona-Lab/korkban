@@ -7,8 +7,9 @@ namespace :epic_events do
 
   desc "Discover epics already closed (SUCCESS/FAILURE/REJECTED/etc) before this app ever tracked them, and backfill their add+remove history"
   task :discover_closed, [ :jql ] => :environment do |_, args|
-    jql = args[:jql].presence ||
-          'issuetype = Epic AND project = PG AND labels = "Priority" AND status IN (SUCCESS, FAILURE, REJECTED, "GONE BAD")'
+    jql = args[:jql].presence || LASER_FOCUS_CONFIG.board.closed_epics_query.presence
+    abort "No JQL given. Pass one as an argument or set board.closed_epics_query in the config." if jql.blank?
+
     count = JiraSync.new.discover_closed_epics!(jql)
     puts "Backfilled #{count} previously-untracked closed epic(s) using: #{jql}"
   end
