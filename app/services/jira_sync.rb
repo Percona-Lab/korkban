@@ -82,7 +82,7 @@ class JiraSync
       orphans.each do |ji|
         if (clashing_epic = epics_by_key.delete(ji.key))
           clashing_epic.update!(removed_at: now)
-          occurred_at = last_field_change_at(ji, %w[status labels]) || now
+          occurred_at = epic_removed_at(ji) || now
           record_epic_events([ [ clashing_epic.id, clashing_epic.jira_key, clashing_epic.name ] ], "removed", now,
                               times_by_key: { clashing_epic.jira_key => occurred_at })
         end
@@ -142,16 +142,20 @@ class JiraSync
   # label/status change time. Safe to run repeatedly; only touches rows whose
   # timestamp actually changes, and skips any jira_key with more than one
   # event since we can't tell which one a single changelog lookup applies to.
+  # A key deleted from Jira makes the whole `key in (...)` query fail, so a
+  # failed lookup is logged and leaves every row untouched instead of raising.
   def backfill_event_times!
     jira_keys = EpicEvent.distinct.pluck(:jira_key)
     return 0 if jira_keys.empty?
 
     updated = 0
-    results = @client.search_all("key in (#{jira_key_list(jira_keys)})", fields: EPIC_FIELDS, expand: "changelog")
+    results = begin
+      @client.search_all("key in (#{jira_key_list(jira_keys)})", fields: EPIC_FIELDS, expand: "changelog")
+    rescue => e
+      Rails.logger.warn("[JiraSync] backfill changelog lookup failed: #{e.message}")
+      return 0
+    end
     results.each do |ji|
-      changed_at = last_field_change_at(ji, %w[status labels])
-      next unless changed_at
-
       events = EpicEvent.where(jira_key: ji.key).to_a
       if events.size > 1
         Rails.logger.warn("[JiraSync] backfill skipped #{ji.key}: #{events.size} events, ambiguous which to update")
@@ -159,7 +163,10 @@ class JiraSync
       end
 
       event = events.first
-      next if event.nil? || event.occurred_at == changed_at
+      next if event.nil?
+
+      changed_at = event.event_type == "added" ? epic_added_at(ji) : epic_removed_at(ji)
+      next if changed_at.nil? || event.occurred_at == changed_at
 
       event.update!(occurred_at: changed_at)
       updated += 1
@@ -181,14 +188,15 @@ class JiraSync
     results.each do |je|
       next if Epic.exists?(jira_key: je.key)
 
-      added_at = last_field_change_at(je, %w[labels]) || parse_time(je.fields["created"]) || Time.current
-      removed_at = last_field_change_at(je, %w[status]) || Time.current
+      added_at = last_field_change_at(je, %w[labels], label_direction: :added) ||
+                 parse_time(je.fields["created"]) || Time.current
+      removed_at = epic_removed_at(je) || Time.current
 
       epic = Epic.create!(
         jira_key: je.key,
         name: je.fields["summary"],
         jira_status: je.fields.dig("status", "name"),
-        priority: priority_int(je.fields["priority"]),
+        priority: priority_int(je.fields["priority"]) || 0,
         raw_fields: je.fields,
         last_seen_in_query_at: Time.current,
         removed_at: removed_at
@@ -220,12 +228,13 @@ class JiraSync
     epic.save!
 
     if was_new || was_removed
+      floor = EpicEvent.where(jira_key: epic.jira_key).maximum(:occurred_at)
       EpicEvent.create!(
         epic: epic,
         jira_key: epic.jira_key,
         name: epic.name,
         event_type: "added",
-        occurred_at: last_field_change_at(je, %w[status labels]) || now
+        occurred_at: epic_added_at(je, floor: floor) || now
       )
     end
 
@@ -252,7 +261,7 @@ class JiraSync
 
     results = @client.search_all("key in (#{jira_key_list(jira_keys)})", fields: EPIC_FIELDS, expand: "changelog")
     results.each_with_object({}) do |ji, times|
-      times[ji.key] = last_field_change_at(ji, %w[status labels]) || now
+      times[ji.key] = epic_removed_at(ji) || now
     end
   rescue => e
     Rails.logger.warn("[JiraSync] epic removal time lookup failed: #{e.message}")
@@ -291,21 +300,54 @@ class JiraSync
   end
 
   # Most recent changelog entry touching any of `fields`. For "labels" we only
-  # count entries that actually mention the "Priority" label, so an unrelated
-  # label edit on the same epic doesn't get credited as an add/remove trigger.
-  def last_field_change_at(ji, fields)
+  # count entries where the "Priority" label actually changed hands in the
+  # given direction (:added / :removed, nil for either), so an unrelated label
+  # edit on the same epic doesn't get credited as an add/remove trigger.
+  def last_field_change_at(ji, fields, label_direction: nil)
     histories = ji.attrs.dig("changelog", "histories") || []
     times = histories.flat_map do |h|
-      relevant = (h["items"] || []).any? do |it|
-        next false unless fields.include?(it["field"])
-        next true unless it["field"] == "labels"
-        [ it["toString"], it["fromString"] ].compact.any? { |s| s.include?("Priority") }
-      end
+      relevant = (h["items"] || []).any? { |it| relevant_change?(it, fields, label_direction) }
       next [] unless relevant
       t = parse_time(h["created"])
       t ? [ t ] : []
     end
     times.max
+  end
+
+  def relevant_change?(item, fields, label_direction)
+    return false unless fields.include?(item["field"])
+    return true unless item["field"] == "labels"
+
+    had = item["fromString"].to_s.include?("Priority")
+    has = item["toString"].to_s.include?("Priority")
+    case label_direction
+    when :added   then has && !had
+    when :removed then had && !has
+    else had || has
+    end
+  end
+
+  # When an epic entered the query. The Priority label being added is the
+  # entering signal on this board, so it wins over status changes; the status
+  # fallback covers epics that re-enter by being reopened. `floor` drops
+  # candidates at or before the epic's previous event, so a stale label add
+  # can't backdate a re-add to before its own removal.
+  def epic_added_at(je, floor: nil)
+    candidates = [
+      last_field_change_at(je, %w[labels], label_direction: :added),
+      last_status_change_at(je)
+    ].compact
+    candidates.reject! { |t| t <= floor } if floor
+    candidates.first
+  end
+
+  # When an epic left the query: the Priority label being removed or a status
+  # transition (to a terminal state), whichever happened last.
+  def epic_removed_at(ji)
+    [
+      last_field_change_at(ji, %w[labels], label_direction: :removed),
+      last_status_change_at(ji)
+    ].compact.max
   end
 
   def priority_int(p)

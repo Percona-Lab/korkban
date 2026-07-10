@@ -364,6 +364,73 @@ class JiraSyncTest < ActiveSupport::TestCase
     assert_equal Time.parse(labeled_at), event.occurred_at
   end
 
+  test "added event prefers the Priority label add over a later unrelated status change" do
+    labeled_at = "2026-06-01T08:00:00.000+0000"
+    status_changed_at = "2026-06-20T10:00:00.000+0000"
+
+    stub_request(:get, %r{/search}).to_return do |req|
+      decoded = CGI.unescape(req.uri.to_s)
+      body = case decoded
+      when /labels.*Priority/i
+               { "issues" => [
+                   { "key" => "PG-1", "fields" => { "summary" => "Epic A",
+                                                    "status" => { "name" => "In Progress" },
+                                                    "priority" => { "id" => "1" } },
+                     "changelog" => { "histories" => [
+                       { "created" => labeled_at,
+                         "items" => [ { "field" => "labels", "toString" => "Priority",
+                                       "fromString" => "" } ] },
+                       { "created" => status_changed_at,
+                         "items" => [ { "field" => "status", "fromString" => "To Do",
+                                       "toString" => "In Progress" } ] }
+                     ] } }
+                 ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
+      else
+               { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
+      end
+      { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
+    end
+
+    JiraSync.new(epic_query: 'project = PG AND labels = "Priority"', unplanned_query: nil).run!
+
+    event = EpicEvent.last
+    assert_equal "added", event.event_type
+    assert_equal Time.parse(labeled_at), event.occurred_at
+  end
+
+  test "re-add is never backdated before the epic's previous removed event" do
+    stale_label_add = "2026-05-01T08:00:00.000+0000"
+    epic = Epic.create!(jira_key: "PG-1", name: "Epic A", priority: 1, jira_status: "In Progress",
+                        removed_at: Time.current)
+    EpicEvent.create!(epic: epic, jira_key: "PG-1", name: "Epic A", event_type: "removed",
+                      occurred_at: Time.parse("2026-06-10T12:00:00.000+0000"))
+
+    stub_request(:get, %r{/search}).to_return do |req|
+      decoded = CGI.unescape(req.uri.to_s)
+      body = case decoded
+      when /labels.*Priority/i
+               { "issues" => [
+                   { "key" => "PG-1", "fields" => { "summary" => "Epic A",
+                                                    "status" => { "name" => "In Progress" },
+                                                    "priority" => { "id" => "1" } },
+                     "changelog" => { "histories" => [
+                       { "created" => stale_label_add,
+                         "items" => [ { "field" => "labels", "toString" => "Priority",
+                                       "fromString" => "" } ] }
+                     ] } }
+                 ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
+      else
+               { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
+      end
+      { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
+    end
+
+    JiraSync.new(epic_query: 'project = PG AND labels = "Priority"', unplanned_query: nil).run!
+
+    event = EpicEvent.where(jira_key: "PG-1", event_type: "added").last
+    assert_operator event.occurred_at, :>, Time.parse("2026-06-10T12:00:00.000+0000")
+  end
+
   test "backdates the removed event to when the epic dropped out via a follow-up changelog lookup" do
     epic = Epic.create!(jira_key: "PG-9", name: "Gone soon", priority: 1, jira_status: "In Progress")
     dropped_at = "2026-06-15T14:30:00.000+0000"
@@ -379,9 +446,9 @@ class JiraSyncTest < ActiveSupport::TestCase
                                        "toString" => "SUCCESS" } ] }
                      ] } }
                  ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
-             else
+      else
                { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
-             end
+      end
       { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
     end
 
@@ -409,9 +476,9 @@ class JiraSyncTest < ActiveSupport::TestCase
                                        "fromString" => "" } ] }
                      ] } }
                  ], "total" => 1, "startAt" => 0, "maxResults" => 50 }
-             else
+      else
                { "issues" => [], "total" => 0, "startAt" => 0, "maxResults" => 50 }
-             end
+      end
       { status: 200, body: body.to_json, headers: { "Content-Type" => "application/json" } }
     end
 
@@ -438,6 +505,23 @@ class JiraSyncTest < ActiveSupport::TestCase
     )
 
     assert_equal 0, JiraSync.new.backfill_event_times!
+  end
+
+  test "backfill_event_times! leaves rows untouched when the changelog lookup fails" do
+    original_time = Time.parse("2026-06-01T08:00:00.000+0000")
+    event = EpicEvent.create!(jira_key: "PG-23", name: "Unlucky", event_type: "added",
+                              occurred_at: original_time)
+
+    stub_request(:get, %r{/search}).to_return(
+      status: 400,
+      body: { "errorMessages" => [ "An issue with key 'PG-23' does not exist" ] }.to_json,
+      headers: { "Content-Type" => "application/json" }
+    )
+
+    assert_nothing_raised do
+      assert_equal 0, JiraSync.new.backfill_event_times!
+    end
+    assert_equal original_time, event.reload.occurred_at
   end
 
   test "backfill_event_times! makes no request when there are no events" do
