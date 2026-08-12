@@ -91,7 +91,7 @@ class Issue < ApplicationRecord
           i += 1
         end
         out << "</ol>"
-      elsif line.strip.empty?
+      elsif line.blank?
         i += 1
       else
         para = []
