@@ -220,7 +220,7 @@ class JiraSync
     epic.assign_attributes(
       name: je.fields["summary"],
       jira_status: je.fields.dig("status", "name"),
-      priority: priority_int(je.fields["priority"]),
+      priority: priority_int(je.fields["priority"]) || 0,
       raw_fields: je.fields,
       last_seen_in_query_at: now,
       removed_at: nil
